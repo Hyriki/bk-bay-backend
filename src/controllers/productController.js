@@ -19,33 +19,6 @@ const getCategories = async (req, res) => {
     }
 };
 
-/**
- * GET /api/products/seller/:sellerId
- */
-const getProductBySeller = async (req, res) => {
-    try {
-        const { sellerId } = req.params;
-        if (!sellerId) {
-            return res.status(400).json({
-                success: false,
-                message: 'sellerId is required'
-            });
-        }
-
-        const products = await productModel.getProductBySeller(sellerId);
-
-        res.status(200).json({
-            success: true,
-            products
-        });
-    } catch (err) {
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch products for seller',
-            error: err.message
-        });
-    }
-};
 
 /**
  * GET /api/products/search?name=...
@@ -106,52 +79,7 @@ const getAllProduct = async (req, res) => {
  *  - recordsets[2] => variations
  *  - recordsets[3] => categories
  */
-const getProductDetails = async (req, res) => {
-    try {
-        const { barcode } = req.params;
-        if (!barcode) {
-            return res.status(400).json({
-                success: false,
-                message: 'barcode is required'
-            });
-        }
-
-        const result = await productModel.getProductDetails(barcode);
-
-        // result may be an array of recordsets or a single recordset depending on the stored proc
-        if (Array.isArray(result)) {
-            const product = (result[0] && result[0][0]) || null;
-            const images = result[1] || [];
-            const variations = result[2] || [];
-
-            if (!product) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'Product not found'
-                });
-            }
-
-            return res.status(200).json({
-                success: true,
-                product,
-                images,
-                variations
-            });
-        } else {
-            // fallback: single recordset / object
-            return res.status(200).json({
-                success: true,
-                data: result
-            });
-        }
-    } catch (err) {
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch product details',
-            error: err.message
-        });
-    }
-};
+ 
 
 const getProductByCategory = async (req, res) => {
     try {
@@ -179,10 +107,54 @@ const getProductByCategory = async (req, res) => {
     }
 };
 
+const getProductDetailsController = async (req, res) => {
+    try {
+        // 1. Input Extraction and Validation
+        // NOTE: Ensure 'barcode' matches the route definition (e.g., router.get('/:barcode', ...))
+        const { barcode } = req.params; 
+
+        if (!barcode) {
+            return res.status(400).json({
+                success: false,
+                message: 'Barcode is required'
+            });
+        }
+        
+        // 2. Service Call
+        // This function handles the DB queries, Promise.all, and data structure.
+        const productData = await productModel.getProductDetails(barcode);
+
+        // 3. Handle 404 Not Found
+        if (!productData) {
+            // The service returns null if the product query yielded no results.
+            return res.status(404).json({
+                success: false,
+                message: 'Product not found'
+            });
+        }
+        
+        // 4. Success Response (HTTP 200 OK)
+        // Spreading productData sends a flat, clean object to the frontend
+        return res.status(200).json({
+            success: true,
+            ...productData
+        });
+
+    } catch (err) {
+        // 5. Handle Server/Database Errors (HTTP 500)
+        console.error("API Error in getProductDetailsController:", err.message);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to fetch product details due to a server error.',
+            error: err.message
+        });
+    }
+};
+
 module.exports = {
     getCategories,
     getProductByCategory,
     getProductByName,
     getAllProduct,
-    getProductDetails,
+    getProductDetailsController,
 };

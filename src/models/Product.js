@@ -389,7 +389,7 @@ async function getAllProduct() {
             p.Bar_code AS barcode,
             p.Name AS productName,
             p.AvgRating,
-            (SELECT TOP 1 v.PRICE FROM VARIATIONS v WHERE v.Bar_code = p.Bar_code ORDER BY v.PRICE ASC) AS price,
+            (SELECT TOP 1 v.PRICE FROM VARIATIONS v WHERE v.Bar_code = p.Bar_code) AS price,
             (SELECT TOP 1 i.IMAGE_URL FROM IMAGES i WHERE i.Bar_code = p.Bar_code) AS image
         FROM Product_SKU p
     `;
@@ -410,18 +410,19 @@ async function getCategories() {
 /*
  * Get full product details by barcode.
  */
-async function getProductDetails(barcode) {
-    const request = pool.request();
-    request.input('barcode', sql.VarChar(100), barcode);
+// async function getProductDetails(barcode) {
+//     const request = pool.request();
 
-    try {
-        const result = await request.execute('sp_GetProductDetails');
-        return result.recordsets;
-    } catch (err) {
-        // Error message
-        throw new Error(`Stored procedure 'sp_GetProductDetails' failed. Original error: ${err.message}`);
-    }
-}
+//     // use the same parameter name as the stored procedure (@Bar_code)
+//     request.input('Bar_code', sql.VarChar(100), barcode);
+    
+//     try {
+//         const result = await request.execute('sp_GetProductDetails');
+//         return result.recordsets;
+//     } catch (err) {
+//         throw new Error(`Stored procedure 'sp_GetProductDetails' failed. Original error: ${err.message}`);
+//     }
+// }
 
 /*
  * Get products by category name.
@@ -448,6 +449,152 @@ async function getProductByCategory(category) {
   const result = await request.query(query);
   return result.recordset || [];
 }
+// Function 1: Get the main product details and calculate the price range
+async function getProductAndPriceRange(pool, barcode) {
+    // 1. Define the separate query strings
+    
+    // A. Query to get MIN/MAX prices (Requires GROUP BY, but no other conflicting columns)
+    const priceQuery = `
+        SELECT
+            MIN(V.PRICE) AS Min_Price,
+            MAX(V.PRICE) AS Max_Price
+        FROM VARIATIONS AS V
+        WHERE V.Bar_code = @barcode;
+    `;
+    
+    // B. Query to get ALL non-aggregated product details (Requires NO GROUP BY)
+    // This is now safe because the Description column is not being grouped.
+    const detailQuery = `
+        SELECT
+            Bar_code,
+            Name,
+            Description,
+            Manufacturing_date,
+            Expired_date,
+            AvgRating,
+            sellerID
+        FROM Product_SKU
+        WHERE Bar_code = @barcode;
+    `;
+    
+    // 2. Prepare the request and parameter binding
+    const request = pool.request();
+    request.input('barcode', sql.VarChar(100), barcode);
+
+    try {
+        // 3. Execute both queries concurrently using Promise.all
+        // We use .query() directly on the request object for efficiency
+        const [detailResult, priceResult] = await Promise.all([
+            request.query(detailQuery),
+            request.query(priceQuery)
+        ]);
+
+        const productDetails = detailResult.recordset[0];
+        const priceDetails = priceResult.recordset[0];
+
+        // 4. Check for Product Existence
+        if (!productDetails) {
+            return null;
+        }
+
+        // 5. Combine and Return the Single, Unified Result
+        return {
+            ...productDetails, // Spread all product detail fields
+            Min_Price: priceDetails?.Min_Price || null,
+            Max_Price: priceDetails?.Max_Price || null
+        };
+        
+    } catch (err) {
+        // Log and rethrow any database error
+        console.error("Error executing combined product detail queries:", err);
+        throw err; 
+    }
+}
+
+// Function 2: Get all image URLs
+async function getProductImages(pool, barcode) {
+    const query = `
+        SELECT
+            IMAGE_URL
+        FROM IMAGES
+        WHERE Bar_code = @barcode
+    `;
+    
+    const request = pool.request();
+    request.input('barcode', sql.VarChar(100), barcode);
+    
+    const result = await request.query(query);
+    return result.recordset; // Returns an array of image objects
+}
+
+// Function 3: Get all variations and their stock/price
+async function getProductVariations(pool, barcode) {
+    const query = `
+        SELECT
+            NAME AS Variation_Name,
+            STOCK,
+            PRICE
+        FROM VARIATIONS
+        WHERE Bar_code = @barcode
+        ORDER BY NAME;
+    `;
+    
+    const request = pool.request();
+    request.input('barcode', sql.VarChar(100), barcode);
+    
+    const result = await request.query(query);
+    return result.recordset; // Returns an array of variation objects
+}
+
+async function getProductDetails(barcode) {
+    // Check if the pool is available (assuming 'pool' is imported/available)
+    if (!pool) {
+        throw new Error('Database connection pool is not available.');
+    }
+    
+    try {
+        // Use Promise.all to run the queries concurrently for performance
+        const [productData, imagesData, variationsData] = await Promise.all([
+            getProductAndPriceRange(pool, barcode),
+            getProductImages(pool, barcode),
+            getProductVariations(pool, barcode)
+        ]);
+        
+        // If the main product query returned null, the product wasn't found
+        if (!productData) {
+            return null;
+        }
+
+        // Combine the results into a final, clean structure
+        return {
+            barcode: productData.Bar_code,
+            name: productData.Name,
+            description: productData.Description,
+            averageRating: productData.AvgRating,
+            manufactureDate: productData.Manufacturing_date,
+            expiredDate: productData.Expired_date,
+            
+            // Calculate and structure the price range
+            priceRange: {
+                min: productData.Min_Price,
+                max: productData.Max_Price,
+            },
+            
+            // Format images and variations
+            images: imagesData.map(img => img.IMAGE_URL),
+            variations: variationsData.map(v => ({
+                name: v.Variation_Name,
+                stock: v.STOCK,
+                price: v.PRICE,
+            }))
+        };
+        
+    } catch (err) {
+        // Log and rethrow any database or Promise.all errors
+        console.error("Error executing product detail queries:", err);
+        throw new Error(`Failed to retrieve product data. Original error: ${err.message}`);
+    }
+}
 
 module.exports = {
   listProductsBySeller,
@@ -463,12 +610,20 @@ module.exports = {
   /*
      New methods
   */
-  getProductByName, // returns products basic info
-  getProductByCategory, // returns products basic info
-  getAllProduct, // returns all products basic info
   getCategories, // returns list of category names
+  // input: category name
+  // returns products name, rating, price, image (can be null)
+  getProductByCategory, 
+  // input: name substring
+  // returns products name, rating, price, image (can be null)
+  getProductByName, 
+  getAllProduct, // returns all products info
   // input barcode
   // returns product details, images, variations, category
+  // getProductDetails,
+  getProductAndPriceRange,
+  getProductImages,
+  getProductVariations,
   getProductDetails,
   addVariationsForProduct,
 };
