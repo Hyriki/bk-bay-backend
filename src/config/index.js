@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const pool = require('./database');
 
 const userRoutes = require('../routes/userRoutes');
+const orderRoutes = require('../routes/orderRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,6 +26,7 @@ app.use(cookieParser());
 
 // Routes
 app.use('/api/users', userRoutes);
+app.use('/api/orders', orderRoutes);
 
 //404 Handler
 app.use((req, res) => {
