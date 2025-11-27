@@ -197,32 +197,42 @@ async function deleteOrder({ orderId, userId }) {
 // src/models/Order.js (Hàm getOrderDetails đã cải tiến)
 
 async function getOrderDetails(statusFilter, minItems) {    
-    // 1. Ưu tiên 1: Gọi Stored Procedure (Tối ưu nhất cho Req 2.3)
+    // Force use fallback query instead of SP to get full user details
+    // Uncomment below to try SP first
+    /*
     try {
         const request = pool.request();
         request.input('p_StatusFilter', sql.VarChar, statusFilter);
         request.input('p_MinItems', sql.Int, parseInt(minItems, 10) || 0);
-
-        // Chạy SP
         result = await request.execute('usp_GetOrderDetails');
-        
         return result.recordset;
-
     } catch (e) {
-        // Dự phòng kích hoạt nếu SP không tồn tại hoặc lỗi
         console.warn(`WARN: Failed to execute usp_GetOrderDetails. Falling back to SQL query. Error: ${e.message}`);
-        
-        // 2. Dự phòng (Fallback): SQL thuần đơn giản
-        // Lưu ý: Cần đảm bảo các bảng liên quan tồn tại (Order, User)
-        try {
-            const fallbackReq = pool.request();
-            fallbackReq.input('p_StatusFilter', sql.VarChar, statusFilter);
+    }
+    */
+    
+    // Direct SQL query with full user details
+    try {
+        const fallbackReq = pool.request();
+        fallbackReq.input('p_StatusFilter', sql.VarChar, statusFilter);
 
             const fallbackQuery = `
                 SELECT 
-                    O.ID, O.[Status], O.Total, U.FullName AS Buyer 
+                    O.ID, 
+                    O.[Status], 
+                    O.Total, 
+                    O.[Address],
+                    O.[Time],
+                    O.buyerID,
+                    U.Username,
+                    U.Email,
+                    U.Gender,
+                    U.Age,
+                    U.DateOfBirth,
+                    U.[Address] AS UserAddress,
+                    U.[Rank]
                 FROM [Order] O 
-                INNER JOIN [User] U ON O.buyerID = U.ID
+                INNER JOIN [User] U ON O.buyerID = U.Id
                 WHERE (@p_StatusFilter IS NULL OR O.[Status] = @p_StatusFilter)
                 ORDER BY O.[Time] DESC;
             `;
@@ -230,11 +240,10 @@ async function getOrderDetails(statusFilter, minItems) {
             const fallbackRes = await fallbackReq.query(fallbackQuery);
             return fallbackRes.recordset;
 
-        } catch (fallbackError) {
-            // Nếu cả cơ chế dự phòng cũng thất bại (Ví dụ: lỗi kết nối)
-            console.error('FATAL FALLBACK ERROR:', fallbackError.message);
-            throw fallbackError;
-        }
+    } catch (fallbackError) {
+        // Nếu cả cơ chế dự phòng cũng thất bại (Ví dụ: lỗi kết nối)
+        console.error('FATAL FALLBACK ERROR:', fallbackError.message);
+        throw fallbackError;
     }
 }
 
@@ -398,6 +407,33 @@ async function confirmDelivery({ orderId, shipperId }) {
     }
 }
 
+async function getOrdersByBuyer(buyerId) {
+    try {
+        const request = pool.request();
+        request.input('p_BuyerID', sql.VarChar(100), buyerId);
+
+        const query = `
+            SELECT 
+                O.ID,
+                O.[Status],
+                O.Total,
+                O.[Address],
+                O.[Time],
+                O.buyerID
+            FROM [Order] O
+            WHERE O.buyerID = @p_BuyerID
+            ORDER BY O.[Time] DESC;
+        `;
+
+        const result = await request.query(query);
+        return result.recordset;
+
+    } catch (e) {
+        console.error('Error fetching orders by buyer:', e.message);
+        throw e;
+    }
+}
+
 module.exports = {
     getTotalByOrderId,
     getOrderById,
@@ -407,5 +443,6 @@ module.exports = {
     getOrderDetails,
     getTopSellingProducts,
     claimOrder,
-    confirmDelivery
+    confirmDelivery,
+    getOrdersByBuyer
 };

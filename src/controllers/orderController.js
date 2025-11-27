@@ -176,10 +176,18 @@ const getOrderDetails = async (req, res) => {
 
         const orders = await orderModel.getOrderDetails(statusFilter, minItems);
 
+        console.log('Orders fetched:', JSON.stringify(orders, null, 2));
+
+        // Sanitize user data in each order (remove Password field)
+        const sanitizedOrders = orders.map(order => {
+            const { Password, ...safeOrder } = order;
+            return safeOrder;
+        });
+
         res.status(200).json({
             success: true,
-            count: orders.length,
-            data: orders
+            count: sanitizedOrders.length,
+            data: sanitizedOrders
         });
     } catch (err) {
         console.error('GET ORDER DETAILS ERROR:', err.message);
@@ -297,6 +305,38 @@ const confirmDelivery = async (req, res) => {
     }
 };
 
+/**
+ * @desc   Get all orders for the current buyer
+ * @route  GET /api/orders/my-orders
+ * @access Private (Buyer)
+ */
+const getOrdersByBuyer = async (req, res) => {
+    try {
+        const buyerId = req.user?.Id;
+
+        if (!buyerId) {
+            return res.status(401).json({ success: false, message: 'Authentication required.' });
+        }
+
+        const role = await userModel.checkRole(buyerId);
+        if (role !== 'buyer' && role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Access denied: Must be a buyer.' });
+        }
+
+        const orders = await orderModel.getOrdersByBuyer(buyerId);
+
+        res.status(200).json({ 
+            success: true, 
+            count: orders.length,
+            orders: orders 
+        });
+
+    } catch (err) {
+        console.error('GET ORDERS BY BUYER ERROR:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to retrieve orders', error: err.message });
+    }
+};
+
 module.exports = {
     createOrder,
     getOrderDetails,
@@ -304,5 +344,6 @@ module.exports = {
     updateOrder,
     deleteOrder,
     claimOrder,
-    confirmDelivery
+    confirmDelivery,
+    getOrdersByBuyer,
 };

@@ -9,7 +9,8 @@ const {
     updateOrder,
     deleteOrder,
     claimOrder,
-    confirmDelivery
+    confirmDelivery,
+    getOrdersByBuyer
 } = require('../controllers/orderController');
 
 // Public routes
@@ -17,6 +18,7 @@ router.post('/', verifyToken, createOrder);
 router.put('/:orderId', verifyToken, updateOrder);
 router.delete('/:orderId', verifyToken, deleteOrder);
 router.get('/details', verifyToken, getOrderDetails);
+router.get('/my-orders', verifyToken, getOrdersByBuyer);
 router.get('/reports/top-selling', verifyToken, getTopSellingProducts);
 router.post('/claim/:orderId', verifyToken, claimOrder);
 router.post('/confirm/:orderId', verifyToken, confirmDelivery);
