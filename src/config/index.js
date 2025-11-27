@@ -37,7 +37,7 @@ app.use('/api/reviews', reviewRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/seller', sellerProductsRoutes);
 app.use('/api/shipper', shipperRoutes);
-// app.use('/api/upload', uploadRoutes);
+app.use('/api/upload', uploadRoutes);
 app.use('/api/orders', orderRoutes);
 
 //404 Handler
