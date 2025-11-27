@@ -222,7 +222,7 @@ async function getOrderDetails(statusFilter, minItems) {
                 SELECT 
                     O.ID, O.[Status], O.Total, U.FullName AS Buyer 
                 FROM [Order] O 
-                INNER JOIN [User] U ON O.buyerID = U.ID
+                INNER JOIN [User] U ON O.buyerID = U.Id
                 WHERE (@p_StatusFilter IS NULL OR O.[Status] = @p_StatusFilter)
                 ORDER BY O.[Time] DESC;
             `;
@@ -398,6 +398,136 @@ async function confirmDelivery({ orderId, shipperId }) {
     }
 }
 
+/**
+ * Get orders for a specific seller (orders containing the seller's products)
+ * @param {string} sellerId - The seller's ID
+ * @param {object} options - Filter options (statusFilter, limit, offset, search)
+ * @returns {Promise<Array>} Array of orders with details
+ */
+async function getSellerOrders(sellerId, options = {}) {
+    try {
+        const { statusFilter, limit = 20, offset = 0, search } = options;
+        const request = pool.request();
+        
+        request.input('sellerId', sql.VarChar, sellerId);
+        request.input('limit', sql.Int, limit);
+        request.input('offset', sql.Int, offset);
+        
+        let whereClause = '';
+        if (statusFilter) {
+            request.input('statusFilter', sql.VarChar, statusFilter);
+            whereClause += ' AND o.[Status] = @statusFilter';
+        }
+        
+        if (search) {
+            request.input('search', sql.VarChar, `%${search}%`);
+            whereClause += ' AND (o.ID LIKE @search OR u.FullName LIKE @search)';
+        }
+        
+        const query = `
+            SELECT DISTINCT
+                o.ID,
+                o.[Status],
+                o.Total,
+                o.[Address],
+                o.[Time],
+                o.buyerID,
+                COALESCE(u.FullName, u.Username, 'N/A') AS BuyerName,
+                u.Email AS BuyerEmail,
+                (
+                    SELECT COUNT(*)
+                    FROM Order_Item oi2
+                    WHERE oi2.orderID = o.ID
+                ) AS ItemCount,
+                (
+                    SELECT STRING_AGG(CONCAT(p.Name, ' (', oi3.Variation_Name, ')'), ', ')
+                    FROM Order_Item oi3
+                    INNER JOIN Product_SKU p ON oi3.BarCode = p.Bar_code
+                    WHERE oi3.orderID = o.ID
+                ) AS ProductNames
+            FROM [Order] o
+            INNER JOIN Order_Item oi ON o.ID = oi.orderID
+            INNER JOIN Product_SKU ps ON oi.BarCode = ps.Bar_code
+            INNER JOIN [User] u ON o.buyerID = u.Id
+            WHERE ps.sellerID = @sellerId ${whereClause}
+            ORDER BY o.[Time] DESC
+            OFFSET @offset ROWS
+            FETCH NEXT @limit ROWS ONLY;
+        `;
+        
+        const result = await request.query(query);
+        return result.recordset || [];
+    } catch (err) {
+        console.error('GET SELLER ORDERS ERROR:', err.message);
+        throw err;
+    }
+}
+
+/**
+ * Update order status
+ * @param {string} orderId - The order ID
+ * @param {string} status - New status
+ * @param {string} userId - User making the update
+ * @param {string} role - User role (seller/admin)
+ * @returns {Promise<object>} Updated order
+ */
+async function updateOrderStatus(orderId, status, userId, role) {
+    try {
+        const request = pool.request();
+        
+        // If seller, verify they own products in this order
+        if (role === 'seller') {
+            request.input('sellerId', sql.VarChar, userId);
+            request.input('orderId', sql.VarChar, orderId);
+            
+            const checkQuery = `
+                SELECT COUNT(*) as count
+                FROM Order_Item oi
+                INNER JOIN Product_SKU ps ON oi.BarCode = ps.Bar_code
+                WHERE oi.orderID = @orderId AND ps.sellerID = @sellerId;
+            `;
+            
+            const checkResult = await request.query(checkQuery);
+            if (!checkResult.recordset[0]?.count || checkResult.recordset[0].count === 0) {
+                throw new Error('Order not found or seller not authorized to update this order');
+            }
+        }
+        
+        // Update the order status
+        const updateRequest = pool.request();
+        updateRequest.input('orderId', sql.VarChar, orderId);
+        updateRequest.input('status', sql.VarChar, status);
+        
+        const updateQuery = `
+            UPDATE [Order]
+            SET [Status] = @status
+            WHERE ID = @orderId;
+            
+            SELECT 
+                o.ID,
+                o.[Status],
+                o.Total,
+                o.[Address],
+                o.[Time],
+                o.buyerID
+            FROM [Order] o
+            WHERE o.ID = @orderId;
+        `;
+        
+        const result = await updateRequest.query(updateQuery);
+        
+        if (!result.recordset || result.recordset.length === 0) {
+            throw new Error('Order not found');
+        }
+        
+        return result.recordset[0];
+    } catch (err) {
+        console.error('UPDATE ORDER STATUS ERROR:', err.message);
+        throw err;
+    }
+}
+
+
 module.exports = {
     getTotalByOrderId,
     getOrderById,
@@ -406,6 +536,8 @@ module.exports = {
     deleteOrder,
     getOrderDetails,
     getTopSellingProducts,
+    getSellerOrders,
+    updateOrderStatus,
     claimOrder,
     confirmDelivery
 };

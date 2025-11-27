@@ -297,6 +297,106 @@ const confirmDelivery = async (req, res) => {
     }
 };
 
+
+/**
+ * @desc Get orders for a specific seller (orders containing seller's products)
+ * @route GET /api/orders/seller
+ * @access Private (Seller only)
+ */
+const getSellerOrders = async (req, res) => {
+    try {
+        const sellerId = req.user?.Id;
+        if (!sellerId) {
+            return res.status(401).json({ success: false, message: 'Authentication required: Seller ID not available' });
+        }
+
+        const role = await userModel.checkRole(sellerId);
+        if (role !== 'seller' && role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Access denied: Seller role required' });
+        }
+
+        // Get query parameters for filtering
+        const statusFilter = req.query.status || null;
+        const limit = parseInt(req.query.limit) || 20;
+        const offset = parseInt(req.query.offset) || 0;
+        const search = req.query.search || null;
+
+        const orders = await orderModel.getSellerOrders(sellerId, { statusFilter, limit, offset, search });
+
+        res.status(200).json({
+            success: true,
+            count: orders.length,
+            orders: orders
+        });
+    } catch (err) {
+        console.error('GET SELLER ORDERS ERROR:', err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve seller orders.',
+            error: err.message
+        });
+    }
+};
+
+/**
+ * @desc Update order status
+ * @route PATCH /api/orders/:orderId/status
+ * @access Private (Seller/Admin)
+ */
+const updateOrderStatus = async (req, res) => {
+    try {
+        const userId = req.user?.Id;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Authentication required' });
+        }
+
+        const role = await userModel.checkRole(userId);
+        if (role !== 'seller' && role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+
+        const { orderId } = req.params;
+        const { status } = req.body;
+
+        if (!status) {
+            return res.status(400).json({ success: false, message: 'Status is required' });
+        }
+
+        // Validate status value
+        const validStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` 
+            });
+        }
+
+        const updated = await orderModel.updateOrderStatus(orderId, status, userId, role);
+
+        res.status(200).json({
+            success: true,
+            message: 'Order status updated successfully',
+            order: updated
+        });
+    } catch (err) {
+        console.error('UPDATE ORDER STATUS ERROR:', err.message);
+        
+        if (err.message.includes('not found')) {
+            return res.status(404).json({ success: false, message: err.message });
+        }
+        if (err.message.includes('not authorized')) {
+            return res.status(403).json({ success: false, message: err.message });
+        }
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update order status.',
+            error: err.message
+        });
+    }
+};
+
+
 module.exports = {
     createOrder,
     getOrderDetails,
@@ -304,5 +404,7 @@ module.exports = {
     updateOrder,
     deleteOrder,
     claimOrder,
-    confirmDelivery
+    confirmDelivery,
+    getSellerOrders,
+    updateOrderStatus
 };
