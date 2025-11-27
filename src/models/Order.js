@@ -35,8 +35,9 @@ async function getOrderById(orderId, buyerId) {
     return order;
 }
 
-const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity, price, barcode, variationname }) => {
+const createOrder = async ({buyerId, total, address, status, quantity, price, barcode, variationname }) => {
     // 1. Create a transaction using the existing pool
+    console.log("Data received for createOrder:", { buyerId, address, status, quantity, price, barcode, variationname });
     const transaction = new sql.Transaction(pool);
 
     try {
@@ -45,48 +46,50 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
 
         // Use the provided id (from controller) when available so tokens match DB id.
         // If no id provided, generate one.
-        const orderId = Id || generateId();
+        const orderId = generateId();
+        const itemIdentifier = generateId();
 
         // 2. Insert into "Order" Table
         const oreq = new sql.Request(transaction);
-        oreq.input('id', sql.VarChar, orderId);
-        // oreq.input('total', sql.Decimal, total);
-        oreq.input('address', sql.VarChar, address);
-        oreq.input('status', sql.VarChar, status);
-        oreq.input('buyerId', sql.VarChar, buyerId);
+        // Match column sizes: ID(100), Address(255), Status(100), buyerID(100)
+        oreq.input('id', sql.VarChar(100), orderId);
+        oreq.input('address', sql.VarChar(255), address);
+        oreq.input('status', sql.VarChar(100), status);
+        oreq.input('buyerId', sql.VarChar(100), buyerId);
         await oreq.query(`
-            INSERT INTO [Order] (ID, [Address], buyerID, [Time], [Status])
-            VALUES (@id, @address, @buyerId, GETDATE(), @status)
+            INSERT INTO [Order] (ID, Total, [Address], buyerID, [Time], [Status])
+            VALUES (@id, 0, @address, @buyerId, GETDATE(), @status)
         `);
 
         if (!barcode || !variationname) {
-            await transaction.rollback();
-            throw new Error('barcode and variationname are required to link (Order_item)');
+            // Do not rollback here; let the catch block perform a single rollback.
+            throw new Error('barcode and variationname are required to link (Order_Item)');
         }
 
         const oitemreq = new sql.Request(transaction);
-        oitemreq.input('price', sql.Decimal, price);
-        oitemreq.input('barcode', sql.VarChar, barcode);
-        oitemreq.input('variation_name', sql.VarChar, variationname);
+        // Match Order_Item schema: Price DECIMAL(10,2), BarCode VARCHAR(100), Variation_Name VARCHAR(100), ID VARCHAR(100), orderID VARCHAR(100)
+        oitemreq.input('price', sql.Decimal(10, 2), price);
+        oitemreq.input('barcode', sql.VarChar(100), barcode);
+        oitemreq.input('variation_name', sql.VarChar(100), variationname);
         oitemreq.input('quantity', sql.Int, quantity);
-        oitemreq.input('id', sql.VarChar, orderItemId);
-        oitemreq.input('orderId', sql.VarChar, orderId);
+        oitemreq.input('id', sql.VarChar(100), itemIdentifier);
+        oitemreq.input('orderId', sql.VarChar(100), orderId);
         await oitemreq.query(`
-            INSERT INTO Order_Item (Price, BarCode, Variation_Name, Quantity, ID, OrderID) 
+            INSERT INTO Order_Item (Price, BarCode, Variation_Name, Quantity, ID, orderID) 
             VALUES (@price, @barcode, @variation_name, @quantity, @id, @orderId)
         `);
 
-        // 4. Calculate and update Order Total
+        // 4. Update Order.Total = SUM(Order_Item.Price * Quantity) for this order
         const totalReq = new sql.Request(transaction);
         totalReq.input('orderId', sql.VarChar, orderId);
         await totalReq.query(`
             UPDATE [Order]
             SET Total = (
-                SELECT SUM(Price * Quantity)
-                FROM Order_Item
-                WHERE orderID = @orderId
+                SELECT COALESCE(SUM(oi.Price * oi.Quantity), 0)
+                FROM Order_Item oi
+                WHERE oi.orderID = @orderId
             )
-            WHERE ID = @orderId
+            WHERE ID = @orderId;
         `);
 
         // 5. Commit Transaction (Save everything)
@@ -100,7 +103,7 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
             address: address, 
             status: status,
             buyerId: buyerId,
-            orderItemId: orderItemId,
+            orderItemId: itemIdentifier,
             quantity: quantity,
             price: price,
             barcode: barcode,
@@ -108,10 +111,87 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
         };
 
     } catch (err) {
-        await transaction.rollback();
+        try {
+            await transaction.rollback();
+        } catch (rbErr) {
+            // Suppress double-rollback EABORT noise; keep original error.
+            if (process.env.NODE_ENV !== 'production') {
+                console.warn('Rollback warning (ignored):', rbErr.message);
+            }
+        }
         throw err;
     }
 };
+
+async function updateOrder({ orderId, newStatus, newAddress }) {
+    const transaction = new sql.Transaction(pool); 
+    
+    try {
+        await transaction.begin();
+        
+        const request = new sql.Request(transaction);
+        
+        request.input('p_OrderID', sql.VarChar, orderId);
+        request.input('p_NewStatus', sql.VarChar, newStatus || null);
+        request.input('p_NewAddress', sql.VarChar, newAddress || null);
+
+        await request.query(`
+            UPDATE [Order] 
+            SET 
+                [Status] = COALESCE(@p_NewStatus, [Status]),
+                Address = COALESCE(@p_NewAddress, Address)
+            WHERE ID = @p_OrderID;
+        `);
+
+        await transaction.commit();
+
+        return { success: true, orderId, updatedStatus: newStatus, updatedAddress: newAddress };
+        
+    } catch (e) {
+        await transaction.rollback();
+        throw e;
+    }
+}
+
+async function deleteOrder({ orderId, userId }) {
+    const transaction = new sql.Transaction(pool);
+    try {
+        await transaction.begin();
+
+        // 1. Kiểm tra Status và Quyền (SELECT DỮ LIỆU TRƯỚC KHI XÓA)
+        const checkReq = new sql.Request(transaction);
+        checkReq.input('p_OrderID', sql.VarChar, orderId);
+        checkReq.input('p_UserID', sql.VarChar, userId);
+        const checkResult = await checkReq.query(`
+            SELECT [Status], buyerID FROM [Order] WHERE ID = @p_OrderID;
+        `);
+        
+        const order = checkResult.recordset[0];
+        if (!order) {
+            await transaction.rollback();
+            throw new Error('Order not found.');
+        }
+
+        if (order.Status !== 'Pending' && order.Status !== 'Processing') {
+            await transaction.rollback();
+            throw new Error('Cannot delete/cancel an order that is in transit or delivered.');
+        }
+        
+        // 2. Thực hiện xóa DML SQL thuần
+        const deleteReq = new sql.Request(transaction);
+        deleteReq.input('p_OrderID', sql.VarChar, orderId);
+        await deleteReq.query(`DELETE FROM [Order] WHERE ID = @p_OrderID AND buyerID = @p_UserID;`);
+        
+        // 3. Commit Transaction
+        await transaction.commit();
+        
+        return { orderId, deleted: true };
+        
+    } catch (e) {
+        await transaction.rollback();
+        throw e;
+    }
+}
 
 // 1. Hàm gọi usp_GetOrderDetails (Mục 2.3 - Query 1)
 // src/models/Order.js (Hàm getOrderDetails đã cải tiến)
@@ -201,6 +281,120 @@ async function getTopSellingProducts(minQuantity, sellerId) {
             console.error('FATAL FALLBACK ERROR IN GET TOP PRODUCTS:', fallbackError.message);
             throw fallbackError;
         }
+    }
+}
+
+async function claimOrder({ orderId, shipperId }) {
+    const transaction = new sql.Transaction(pool);
+    
+    try {
+        await transaction.begin(); 
+        
+        const request = new sql.Request(transaction); 
+        
+        request.input('p_OrderID', sql.VarChar, orderId);
+        request.input('p_ShipperID', sql.VarChar, shipperId);
+        
+        // T-SQL TRANSACTION DML: Claim Order
+        const claimQuery = `
+            DECLARE @v_CurrentStatus VARCHAR(100);
+            
+            -- 1. Kiểm tra trạng thái hiện tại (Validation: Phải ở Processing)
+            SELECT @v_CurrentStatus = [Status] FROM [Order] WHERE ID = @p_OrderID;
+
+            IF @v_CurrentStatus IS NULL
+            BEGIN
+                THROW 50005, 'Order not found.', 1;
+                RETURN;
+            END
+
+            IF @v_CurrentStatus <> 'Processing'
+            BEGIN
+                THROW 50006, 'Order status must be "Processing" to be claimed.', 1;
+                RETURN;
+            END
+
+            -- 2. INSERT vào bảng Deliver (Claim the Order)
+            INSERT INTO Deliver (ShipperID, OrderID, Departure_time, Finish_time, ShippingFee)
+            VALUES (@p_ShipperID, @p_OrderID, NULL, NULL, NULL); 
+
+            -- 3. UPDATE trạng thái Order: Processing -> Dispatched
+            UPDATE [Order] 
+            SET [Status] = 'Dispatched' 
+            WHERE ID = @p_OrderID;
+            
+            -- Trả về trạng thái mới
+            SELECT 'Dispatched' AS NewStatus;
+        `;
+
+        const result = await request.query(claimQuery);
+
+        await transaction.commit(); 
+        
+        return { 
+            success: true, 
+            newStatus: result.recordset[0]?.NewStatus || 'Dispatched',
+            orderId: orderId
+        };
+        
+    } catch (e) {
+        await transaction.rollback(); 
+        throw e;
+    }
+}
+
+// src/models/Order.js (confirmDelivery)
+
+async function confirmDelivery({ orderId, shipperId }) {
+    const transaction = new sql.Transaction(pool);
+    
+    try {
+        await transaction.begin(); 
+        
+        const request = new sql.Request(transaction);
+        request.input('p_OrderID', sql.VarChar, orderId);
+        request.input('p_ShipperID', sql.VarChar, shipperId);
+
+        // T-SQL TRANSACTION DML: Confirm Delivery
+        const confirmQuery = `
+            DECLARE @v_CurrentStatus VARCHAR(100);
+            
+            -- 1. Kiểm tra trạng thái hiện tại (Validation: Phải ở Delivering)
+            SELECT @v_CurrentStatus = [Status] FROM [Order] WHERE ID = @p_OrderID;
+
+            IF @v_CurrentStatus <> 'Delivering'
+            BEGIN
+                THROW 50007, 'Order must be in "Delivering" status to be confirmed as delivered.', 1;
+                RETURN;
+            END
+            
+            -- 2. UPDATE bảng Deliver: Ghi nhận Finish_time
+            UPDATE Deliver
+            SET Finish_time = GETDATE()
+            WHERE OrderID = @p_OrderID AND ShipperID = @p_ShipperID;
+
+            -- 3. UPDATE trạng thái Order: Delivering -> Delivered
+            UPDATE [Order] 
+            SET [Status] = 'Delivered' 
+            WHERE ID = @p_OrderID;
+            
+            -- Trả về trạng thái mới
+            SELECT 'Delivered' AS NewStatus;
+        `;
+
+        const result = await request.query(confirmQuery);
+
+        await transaction.commit();
+        
+        return { 
+            success: true, 
+            newStatus: result.recordset[0]?.NewStatus || 'Delivered',
+            orderId: orderId
+        };
+        
+    } catch (e) {
+        await transaction.rollback();
+        throw e;
     }
 }
 
@@ -338,9 +532,12 @@ module.exports = {
     getTotalByOrderId,
     getOrderById,
     createOrder,
+    updateOrder,
+    deleteOrder,
     getOrderDetails,
     getTopSellingProducts,
     getSellerOrders,
-    updateOrderStatus
-    // ...
+    updateOrderStatus,
+    claimOrder,
+    confirmDelivery
 };

@@ -7,24 +7,26 @@ const {
     getProductByName,
     getAllProduct,
     getProductByCategory,
-    getProductDetails,
-    assignCategory
+    getProductDetailsController,
 } = require('../controllers/productController');
 
 // Public routes
+// input: none
+// returns list of category names
 router.get('/categories', getCategories);
-router.get('/categories', getProductByCategory);
+// Search by category: /api/products/categories?category=beverages
+router.get('/category/:category', getProductByCategory);
 
 // Search by name: /api/products/search?name=apple
+// Returns products name, rating, price, image (can be null)
 router.get('/search', getProductByName);
 
-// Get all products
+// input: none
+// returns all products info
 router.get('/all', getAllProduct);
 
-// Assign category to product: POST /api/products/:barcode/category
-router.post('/:barcode/category', assignCategory);
-
-// Generic barcode route must come last to avoid capturing other routes
-router.get('/:barcode', getProductDetails);
+// input: barcode
+// returns product details, images, variations, category
+router.get('/:barcode', getProductDetailsController);
 
 module.exports = router;
