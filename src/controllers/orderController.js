@@ -349,7 +349,7 @@ const getSellerOrders = async (req, res) => {
 /**
  * @desc Update order status
  * @route PATCH /api/orders/:orderId/status
- * @access Private (Seller/Admin)
+ * @access Private (Seller/Admin - NOT Shipper)
  */
 const updateOrderStatus = async (req, res) => {
     try {
@@ -359,8 +359,11 @@ const updateOrderStatus = async (req, res) => {
         }
 
         const role = await userModel.checkRole(userId);
-        if (role !== 'seller' && role !== 'admin') {
-            return res.status(403).json({ success: false, message: 'Access denied' });
+        if (role !== 'seller' && role !== 'admin' && role !== 'shipper') {
+            return res.status(403).json({ 
+                success: false, 
+                message: 'Access denied: Only sellers and admins can update order status' 
+            });
         }
 
         const { orderId } = req.params;
@@ -444,5 +447,8 @@ module.exports = {
     updateOrder,
     deleteOrder,
     claimOrder,
-    confirmDelivery
+    confirmDelivery,
+    getOrdersByBuyer,
+    getSellerOrders,
+    updateOrderStatus
 };

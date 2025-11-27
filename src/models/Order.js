@@ -529,6 +529,23 @@ async function updateOrderStatus(orderId, status, userId, role) {
             }
         }
         
+        // If shipper, verify they claimed this order
+        if (role === 'shipper') {
+            request.input('shipperId', sql.VarChar, userId);
+            request.input('orderId', sql.VarChar, orderId);
+            
+            const checkQuery = `
+                SELECT COUNT(*) as count
+                FROM [Order]
+                WHERE ID = @orderId AND shipperID = @shipperId;
+            `;
+            
+            const checkResult = await request.query(checkQuery);
+            if (!checkResult.recordset[0]?.count || checkResult.recordset[0].count === 0) {
+                throw new Error('Order not found or shipper not authorized to update this order');
+            }
+        }
+        
         // Update the order status
         const updateRequest = pool.request();
         updateRequest.input('orderId', sql.VarChar, orderId);
