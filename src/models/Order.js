@@ -35,8 +35,9 @@ async function getOrderById(orderId, buyerId) {
     return order;
 }
 
-const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity, price, barcode, variationname }) => {
+const createOrder = async ({buyerId, total, address, status, quantity, price, barcode, variationname }) => {
     // 1. Create a transaction using the existing pool
+    console.log("Data received for createOrder:", { buyerId, address, status, quantity, price, barcode, variationname });
     const transaction = new sql.Transaction(pool);
 
     try {
@@ -45,35 +46,50 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
 
         // Use the provided id (from controller) when available so tokens match DB id.
         // If no id provided, generate one.
-        const orderId = Id || generateId();
-        const itemIdentifier = orderItemId || generateId();
+        const orderId = generateId();
+        const itemIdentifier = generateId();
 
         // 2. Insert into "Order" Table
         const oreq = new sql.Request(transaction);
-        oreq.input('id', sql.VarChar, orderId);
-        oreq.input('address', sql.VarChar, address);
-        oreq.input('status', sql.VarChar, status);
-        oreq.input('buyerId', sql.VarChar, buyerId);
+        // Match column sizes: ID(100), Address(255), Status(100), buyerID(100)
+        oreq.input('id', sql.VarChar(100), orderId);
+        oreq.input('address', sql.VarChar(255), address);
+        oreq.input('status', sql.VarChar(100), status);
+        oreq.input('buyerId', sql.VarChar(100), buyerId);
         await oreq.query(`
-            INSERT INTO [Order] (ID, [Address], buyerID, [Time], [Status])
-            VALUES (@id, @address, @buyerId, GETDATE(), @status)
+            INSERT INTO [Order] (ID, Total, [Address], buyerID, [Time], [Status])
+            VALUES (@id, 0, @address, @buyerId, GETDATE(), @status)
         `);
 
         if (!barcode || !variationname) {
-            await transaction.rollback();
-            throw new Error('barcode and variationname are required to link (Order_item)');
+            // Do not rollback here; let the catch block perform a single rollback.
+            throw new Error('barcode and variationname are required to link (Order_Item)');
         }
 
         const oitemreq = new sql.Request(transaction);
-        oitemreq.input('price', sql.Decimal, price);
-        oitemreq.input('barcode', sql.VarChar, barcode);
-        oitemreq.input('variation_name', sql.VarChar, variationname);
+        // Match Order_Item schema: Price DECIMAL(10,2), BarCode VARCHAR(100), Variation_Name VARCHAR(100), ID VARCHAR(100), orderID VARCHAR(100)
+        oitemreq.input('price', sql.Decimal(10, 2), price);
+        oitemreq.input('barcode', sql.VarChar(100), barcode);
+        oitemreq.input('variation_name', sql.VarChar(100), variationname);
         oitemreq.input('quantity', sql.Int, quantity);
-        oitemreq.input('id', sql.VarChar, itemIdentifier);
-        oitemreq.input('orderId', sql.VarChar, orderId);
+        oitemreq.input('id', sql.VarChar(100), itemIdentifier);
+        oitemreq.input('orderId', sql.VarChar(100), orderId);
         await oitemreq.query(`
-            INSERT INTO Order_Item (Price, BarCode, Variation_Name, Quantity, ID, OrderID) 
+            INSERT INTO Order_Item (Price, BarCode, Variation_Name, Quantity, ID, orderID) 
             VALUES (@price, @barcode, @variation_name, @quantity, @id, @orderId)
+        `);
+
+        // 4. Update Order.Total = SUM(Order_Item.Price * Quantity) for this order
+        const totalReq = new sql.Request(transaction);
+        totalReq.input('orderId', sql.VarChar, orderId);
+        await totalReq.query(`
+            UPDATE [Order]
+            SET Total = (
+                SELECT COALESCE(SUM(oi.Price * oi.Quantity), 0)
+                FROM Order_Item oi
+                WHERE oi.orderID = @orderId
+            )
+            WHERE ID = @orderId;
         `);
 
         // 5. Commit Transaction (Save everything)
@@ -87,7 +103,7 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
             address: address, 
             status: status,
             buyerId: buyerId,
-            orderItemId: orderItemId,
+            orderItemId: itemIdentifier,
             quantity: quantity,
             price: price,
             barcode: barcode,
@@ -95,7 +111,14 @@ const createOrder = async ({ Id, orderItemId, buyerId, address, status, quantity
         };
 
     } catch (err) {
-        await transaction.rollback();
+        try {
+            await transaction.rollback();
+        } catch (rbErr) {
+            // Suppress double-rollback EABORT noise; keep original error.
+            if (process.env.NODE_ENV !== 'production') {
+                console.warn('Rollback warning (ignored):', rbErr.message);
+            }
+        }
         throw err;
     }
 };
