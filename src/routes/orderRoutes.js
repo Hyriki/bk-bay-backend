@@ -6,6 +6,8 @@ const {
     createOrder, 
     getOrderDetails, 
     getTopSellingProducts,
+    getSellerOrders,
+    updateOrderStatus,
     updateOrder,
     deleteOrder,
     claimOrder,
@@ -20,6 +22,8 @@ router.delete('/:orderId', verifyToken, deleteOrder);
 router.get('/details', verifyToken, getOrderDetails);
 router.get('/my-orders', verifyToken, getOrdersByBuyer);
 router.get('/reports/top-selling', verifyToken, getTopSellingProducts);
+router.get('/seller', verifyToken, getSellerOrders);
+router.patch('/:orderId/status', verifyToken, updateOrderStatus);
 router.post('/claim/:orderId', verifyToken, claimOrder);
 router.post('/confirm/:orderId', verifyToken, confirmDelivery);
 
